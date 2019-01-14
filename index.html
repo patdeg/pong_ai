@@ -1,0 +1,736 @@
+<html>
+<head>
+	<script type="text/javascript" src="https://www.gstatic.com/charts/loader.js"></script>
+</head>
+<body>
+	<h1 id="title">Game</h1>
+	<canvas id="myCanvas" width="600" height="300"></canvas>
+
+	<form>
+		<label for="speed">Play Speed</label>
+        <input type="range" min="-100" max="20" value="0" class="slider" id="speed">
+        <BR><label for="frame">Frame Speed</label>
+        <input type="range" min="1" max="100" value="30" class="slider" id="frame">
+    </form>
+
+	<div id="scoreChart" style="height: 300px; width: 80%;"></div>
+    <div id="lossChart" style="height: 300px; width: 100%;"></div>
+    <div id="timeChart" style="height: 300px; width: 100%;"></div>
+
+
+<!--script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@0.14.1/dist/tf.min.js"></script-->
+<script src="tf.min.js"></script>
+<script src="reimprove.js"></script>
+
+<script>
+'use strict';
+// Reinforcement Learning from https://github.com/seann999/dodge_tfjs
+
+var DEBUG=false;
+
+const loaded_model = tf.loadModel('localstorage://my-model-1');
+
+function logprint(a,b,c,d) {
+	if (!DEBUG) return;
+	if (d) {
+		console.log(a,b,c,d);
+	} else if (c) {
+		console.log(a,b,c);
+	} else if (b) {
+		console.log(a,b);
+	} else {
+		console.log(a);
+	}
+}
+
+logprint("Starting...");
+
+//TO READ:
+// https://medium.com/emergent-future/simple-reinforcement-learning-with-tensorflow-part-0-q-learning-with-tables-and-neural-networks-d195264329d0
+// https://github.com/BeTomorrow/ReImproveJS
+
+
+var params = {
+  minibatchSize: 32,
+  replayMemorySize: 10000,
+  stackFrames: 10,
+  targetUpdateFreq: 100,
+  discount: 0.99,
+  actionRepeat: 1,
+  learningRate: 0.001,
+  initExp: 1.0,
+  finExp: 0.1,
+  finExpFrame: 10000,
+  replayStartSize: 100,
+  numSensors: 4,
+  //hiddenLayers: [64, 64],
+  hiddenLayers: [64, 64],
+  activation: 'elu',
+  maxEpisodeFrames: 10000
+};
+
+var trainer = null;
+var info = null;
+var training = false;
+var started = false;
+var reset = false;
+
+var model = null;
+var targetModel = null;
+
+var modelVars = null;
+var replay = null;
+var optimizer = null;
+
+function resetSignal() {
+  reset = true;
+}
+
+var speedSlider = document.getElementById('speed');
+var frameSlider = document.getElementById('frame');
+
+function resetTrain() {
+	logprint(">> resetTrain");
+
+	reset = false;
+	started = false;
+	training = false;
+	info = null;
+
+	resetGame();
+
+//TODO: Update chart (see resetChartData)
+  
+	logprint("resetting; numTensors: " + tf.memory().numTensors);
+
+	for (let i = 0; i < model.weights.length; i++) {
+		model.weights[i].val.dispose();
+	}
+
+	for (let i = 0; i < targetModel.weights.length; i++) {
+		targetModel.weights[i].val.dispose();
+	}
+
+	//for(var key in optimizer) {
+		//if (optimizer[key]['isDisposed'] !== undefined) {
+		//	optimizer[key].dispose();
+		//}
+	//}
+
+	logprint('model:',model);
+	logprint('targerModel:',targetModel);
+	logprint("reset; numTensors: " + tf.memory().numTensors);
+
+	logprint('>>> Training Mode: Start');
+
+}
+
+
+function initTrain() {
+	logprint(">> initTrain");
+
+	modelVars = [];
+	replay = [];
+	optimizer = tf.train.adam(params.learningRate);
+
+	trainer = trainGen();
+
+	logprint("building model...");
+	targetModel =  createModel();
+	model = createModel();
+	targetUpdate();
+
+	for (let i = 0; i < model.weights.length; i++) {
+		modelVars.push(model.weights[i].val);
+	}
+
+	for (let i = 0; i < model.weights.length; i++) {
+		logprint('dataSync',i,model.weights[i].val.dataSync());
+	}
+}
+
+function toggleTrain() {
+	logprint(">> toggleTrain");
+	if (!training) {
+		logprint("starting; numTensors: " + tf.memory().numTensors);
+
+		if (!started) {
+	  		initTrain();
+	  		logprint("init; numTensors: " + tf.memory().numTensors);
+
+	  		setTimeout(trainUpdate, 0);
+
+	  		started = true;
+		}   
+
+		training = true;
+		logprint("Training: Resume");
+	} else {
+		training = false;
+		logprint("Training: Paused");
+	}
+}
+
+function createModel(stack) {
+	logprint(">> createModel");
+
+	const model = tf.sequential();
+
+	model.add(tf.layers.dense({
+		units: params.hiddenLayers[0],
+		activation: params.activation,
+		inputDim: (params.numSensors+1)*params.stackFrames
+	}));
+
+	for (let i = 0; i < params.hiddenLayers.length-1; i++) {
+		model.add(tf.layers.dense({
+			units: params.hiddenLayers[i+1],
+	  		activation: params.activation,
+	  		inputDim: params.hiddenLayers[i]
+		}));
+	}
+
+	model.add(tf.layers.dense({
+		units: N_ACTIONS,
+		activation: 'linear',
+		inputDim: params.hiddenLayers[params.hiddenLayers.length-1]
+	}));
+
+	return model;
+}
+
+function trainUpdate() {
+	logprint(">> trainUpdate");
+	if (reset) {
+		logprint("reseting...");
+		resetTrain();
+	} else {
+		if (training) {
+			logprint("training...");
+			for (let i = 0; i < Math.max(1, speedSlider.value); i++) {
+				info = trainer.next().value;
+			}
+		} else {
+			logprint("not training...");
+		}
+		setTimeout(trainUpdate, Math.max(0, -speedSlider.value));
+	}
+}
+
+function targetUpdate() {
+	logprint(">> targetUpdate");
+
+	for (let i = 0; i < model.weights.length; i++) {
+		targetModel.weights[i].val.assign(model.weights[i].val);
+	}
+}
+
+function mse(predictions, targets, mask) {
+	logprint(">> mse");
+	const e = tf.mul(predictions.sub(targets.expandDims(1)).square(), mask.asType('float32')).mean();
+	return e;
+}
+
+function calcTarget(batchR, batchNextS, batchDone) {
+	logprint(">> calcTarget");
+	return tf.tidy(() => {
+		const maxQ = targetModel.predict(batchNextS).max(1);
+		const targets = batchR.add(maxQ.mul(tf.scalar(params.discount)).mul(batchDone));
+		return targets;
+	});
+}
+
+function* trainGen(episodes = 10000000) {
+	logprint(">> trainGen");
+	const scores = [];
+	var totalFrames = 0;
+
+ 	for (let ep = 0; ep < episodes; ep++) {
+ 		logprint(">> Episode:",ep);
+ 		
+	    var history = [resetGame()];
+	    var epDone = false;
+	    var epFrames = 0;
+	    const startTime = new Date().getTime();
+
+    	function stackObs() {
+    		logprint(">> stackObs");
+      		const arrays = [];
+
+      		for (let i = 0; i < params.stackFrames; i++) {
+        		arrays.push(history[Math.max(0, history.length-1-i)]);
+      		}
+
+      		return Array.prototype.concat.apply([], arrays);
+    	}
+
+    	while (!epDone) {
+    		logprint("loop:",epDone);
+
+      		var act = Math.floor(Math.random()*N_ACTIONS);
+      		const observation = stackObs();
+      		const obsTensor = tf.tensor2d([observation]);
+      		const vals = model.predict(obsTensor);
+      		obsTensor.dispose();
+
+      		const a = Math.min(1, totalFrames/params.finExpFrame);
+
+	        if (replay.length >= params.replayStartSize && Math.random() > a*params.finExp+(1-a)*params.initExp) {
+	        	const maxAct = vals.argMax(1);
+				act = maxAct.dataSync()[0];
+				maxAct.dispose();
+	        }
+
+	      	var result = null;
+	      	logprint("Looping on action");
+	      	for (let t = 0; t < params.actionRepeat; t++) {
+	        	result = step(act);
+	        	logprint("step loop:",t,result);
+	      	}
+
+	      	const normVals = tf.softmax(vals);
+
+	      	history.push(result.sensors);
+	      	const nextS = stackObs();
+
+			yield {
+				frame: totalFrames,
+				episode: ep,
+				score: epFrames,
+				observation: nextS,
+				reward: result.reward,
+				values: vals.dataSync(),
+				normValues: normVals.dataSync(),
+				action: act
+			};
+
+			vals.dispose();
+			normVals.dispose();
+
+			epDone = result.gameOver || epFrames > params.maxEpisodeFrames || reset;
+
+			replay.push({
+				prevS: observation, 
+				action: act, 
+				reward: result.reward, 
+				nextS: nextS, 
+				done: epDone
+			});
+
+			if (replay.length > params.replayMemorySize) {
+				replay = replay.slice(replay.length - params.replayMemorySize);
+			}
+
+	      	if (replay.length >= params.replayStartSize) {
+	        	const loss = learn();
+
+	        	if (result.gameOver) {
+	          		const lossc = loss.dataSync()[0];
+	          		console.log("Loss:",lossc);
+	          		console.log("Bounced:",bounced_count);
+	          		data2.addRows([[ep, lossc]]);
+
+	          		if (((epoch<100) && (epoch % 10 == 1)) ||  (epoch % 100 == 0)) {
+						console.log("Saving model...");
+						const status = model.save('localstorage://my-model-' + epoch);
+						console.log("Status:",status);
+					}
+
+	        	}
+	        	loss.dispose();
+	     	}
+
+	      	epFrames++;
+	      	totalFrames++;
+
+	      	if (totalFrames % params.targetUpdateFreq === 0) {
+	        	targetUpdate();
+
+				logprint("frame: " + totalFrames);
+				logprint("replay buffer: " + replay.length);
+				logprint("numTensors: " + tf.memory().numTensors);
+			}
+	    }
+
+	    scores.push(epFrames);
+	    const fps = epFrames/((new Date().getTime() - startTime)/1000);
+	    console.log("ep " + ep + ": survived " + epFrames + "; frames/second: " + fps);
+
+	    data1.addRows([[ep, bounced_count]]);
+	    data3.addRows([[ep, fps]]);
+	    updateGraphs();
+	    epoch++;
+	}
+}
+
+function learn() {
+	const arrayPrevS = [];
+	const arrayA = [];
+	const arrayR = [];
+	const arrayNextS = [];
+	const arrayDone = [];
+
+	for (let i = 0; i < params.minibatchSize; i++) {
+		const exp = replay[Math.floor(Math.random() * replay.length)];
+		arrayPrevS.push(exp.prevS);
+		arrayA.push(exp.action);
+		arrayNextS.push(exp.nextS);
+		arrayR.push(exp.reward);
+		arrayDone.push(exp.done ? 0 : 1);
+	}
+
+	
+	const batchPrevS = tf.tensor2d(arrayPrevS);
+	const batchA = tf.tensor1d(arrayA, 'int32');
+	const batchR = tf.tensor1d(arrayR);
+	const batchNextS = tf.tensor2d(arrayNextS);
+	const batchDone = tf.tensor1d(arrayDone);
+  
+	const predMask = tf.oneHot(batchA, N_ACTIONS);
+
+	const targets = calcTarget(batchR, batchNextS, batchDone);
+
+  	const loss = optimizer.minimize(() => {
+    	const x = tf.variable(batchPrevS);
+    	const predictions = model.predict(x);
+    	const re = mse(predictions, targets, predMask);
+    	x.dispose();
+    	return re;
+  	}, true, modelVars);
+
+	targets.dispose();
+
+	batchPrevS.dispose();
+	batchA.dispose();
+	batchR.dispose();
+	batchNextS.dispose();
+	batchDone.dispose();
+
+	predMask.dispose();
+
+ 	return loss;
+}
+
+/* ---------------------------------------------- World --- */
+
+var up = false, down = false;
+const N_ACTIONS = 3; // up, down, stay
+
+var frame = 0;
+
+var XMAX = 600;
+var YMAX = 300;
+var PAD = 50;
+var RACKET_HEIGHT = 50;
+var BALL_SPEED=10;
+var BOX = {
+	x1: PAD,
+	y1: PAD,
+	x2: XMAX-PAD,
+	y2: YMAX-PAD
+};
+
+var bounced_count = 0;
+var epoch = 0;
+
+var GAME = {
+	x: XMAX/2, 
+	y: YMAX/2, 
+	vx:10, 
+	vy: 10,
+	z: YMAX/2-RACKET_HEIGHT/2
+}
+
+function resetGame() {
+
+	document.getElementById('title').innerHTML = 'Game ' + (epoch+1);
+
+	// angle at which the ball will start moving
+	var alpha = Math.random()*Math.PI/2-Math.PI/4;
+
+	GAME = { 
+		x: XMAX/2, 
+		y: YMAX/2, 
+		vx:BALL_SPEED*Math.cos(alpha), 
+		vy: BALL_SPEED*Math.sin(alpha),
+		z: YMAX/2-RACKET_HEIGHT/2
+	};
+
+	bounced_count = 0;
+	
+	// return initial observation
+	return getSensors();
+}
+
+// Return sensorial information about the game situation
+function getSensors() {
+	const sensors = [];
+	sensors.push(GAME.z/YMAX-0.5); // racket position
+	sensors.push(GAME.x/XMAX); // ball x coordinate
+	sensors.push(GAME.y/YMAX-0.5); // bale y coordinate
+	sensors.push(GAME.vx/XMAX); // ball velocity x coordinate
+	sensors.push(GAME.vy/YMAX); // bale velocity y coordinate
+	return sensors;
+}
+
+
+function updateBall() {
+	logprint(">> updateBall");
+
+	GAME.x = GAME.x + GAME.vx;
+	GAME.y = GAME.y + GAME.vy;
+	var nextX = GAME.x + GAME.vx;
+	var nextY = GAME.y + GAME.vy;
+
+	var gameStatus=0; // nothing special
+
+	// Upper Wall
+	if  (nextY<=BOX.y1)  {
+		GAME.vy = -GAME.vy
+	}
+	// Lower Wall
+	if  (nextY>=BOX.y2)  {
+		GAME.vy = -GAME.vy
+	}
+	// Right Wall
+	if  (nextX>=BOX.x2)  {
+		GAME.vx = -GAME.vx
+	}
+
+	// Racket
+	if ((nextX<=BOX.x1) && (nextY>=GAME.z) && (nextY<=GAME.z+RACKET_HEIGHT)) {
+		GAME.vx = -GAME.vx
+		gameStatus = 1; // Rebounded on racket
+		bounced_count++;
+	}
+
+	// Lost
+	if ((nextX<=PAD/2) || (nextX>=XMAX-PAD/2) || (nextY<=PAD/2) || (nextY>=YMAX-PAD/2)) {
+		gameStatus = -1; // Ball lost
+	}		
+
+	return gameStatus;
+}
+
+function updateRacket(act) {
+	logprint(">> updateRacket", act);
+	if (act==0) GAME.z = GAME.z - RACKET_HEIGHT/2; // Up key
+	if (act==2) GAME.z = GAME.z + RACKET_HEIGHT/2; // Down key
+	if (GAME.z<BOX.y1) {
+		GAME.z = BOX.y1;
+	}
+	if (GAME.z+RACKET_HEIGHT>BOX.y2) {
+		GAME.z = BOX.y2-RACKET_HEIGHT;
+	}
+}
+
+function step(act) {
+	logprint(">> step", act);
+
+	var status = updateBall();
+	updateRacket(act);
+
+	var sensors = getSensors();
+	logprint("Ball:",GAME.x,GAME.y);
+
+	logprint("frame:",frame);
+	if (frame % frameSlider.value == 0) {
+	    draw(ctx);
+	}
+	frame++;
+
+	var reward = 0; // nothing
+	if (status==-1) reward = -1; // Lost ball
+	if (status==1) reward = 1; // Rebound
+
+	return {sensors: sensors, reward: reward, gameOver: status==-1};
+
+};
+
+
+/* ---------------------------------------------- Renderingof the game --- */
+
+
+var canvas = document.getElementById("myCanvas");
+var ctx = canvas.getContext("2d");
+
+const KEY_Q = 81;
+const KEY_W = 87;
+const KEY_S = 83;
+const KEY_ESC = 27;
+const KEY_L = 76;
+
+function draw(ctx) {
+	ctx.clearRect(0,0,canvas.width, canvas.height);
+	
+	// Draw box
+	ctx.beginPath();
+	ctx.strokeSyle='black';
+	ctx.lineWidth=5;
+	ctx.moveTo(BOX.x1,BOX.y1);
+	ctx.lineTo(BOX.x2,BOX.y1);
+	ctx.lineTo(BOX.x2,BOX.y2);
+	ctx.lineTo(BOX.x1,BOX.y2);
+	ctx.stroke();
+	
+	// Draw racket
+	ctx.beginPath();
+	ctx.strokeSyle='black';
+	ctx.lineWidth=5;
+	ctx.moveTo(BOX.x1,GAME.z);
+	ctx.lineTo(BOX.x1,GAME.z+RACKET_HEIGHT);
+	ctx.stroke();		
+
+	// Draw ball
+	ctx.beginPath();
+	ctx.fillStyle='red';
+  	ctx.strokeSyle='red';
+	ctx.lineWidth=1;
+	ctx.arc(GAME.x, GAME.y, 5, 0, 2*Math.PI);
+	ctx.fill();
+
+}
+
+window.addEventListener('keyup', (e) => {
+	var code = e.keyCode;
+	//if (code == KEY_W) up = false;
+	//if (code == KEY_S) down = false;
+}, false);
+
+window.addEventListener('keydown', (e) => {
+	var code = e.keyCode;
+	
+	//if (code == KEY_W) up = true;
+	//if (code == KEY_S) down = true;
+	//if (code == KEY_Q) toggleTrain();
+	//if (code == KEY_ESC) resetGame();
+
+	if (code == KEY_S) {
+		console.log("Saving model...", model);
+		const status = model.save('localstorage://my-model-1');
+		console.log("Status:",status);
+	}
+
+}, false);
+
+
+/* ---------------------------------------------- Plot Results --- */
+
+var data1, chart1, data2, chart2, data3, chart3;
+
+
+google.charts.load('current', {packages: ['corechart', 'line']});
+google.charts.setOnLoadCallback(drawCharts);
+
+var chart1opt = {
+  hAxis: {
+    title: 'Episode'
+  },
+  vAxis: {
+    title: 'Bounced'
+  }
+};
+
+var chart2opt = {
+  hAxis: {
+    title: 'Episode'
+  },
+  vAxis: {
+    title: 'Loss',
+    scaleType: 'log'
+  },
+  colors: ['red']
+};
+
+var chart3opt = {
+  hAxis: {
+    title: 'Episode'
+  },
+  vAxis: {
+    title: 'Frames/Second'
+  },
+  colors: ['orange']
+};
+
+function resetChartData() {
+  data1 = new google.visualization.DataTable();
+  data1.addColumn('number', 'X');
+  data1.addColumn('number', 'Agent');
+  data2 = new google.visualization.DataTable();
+  data2.addColumn('number', 'X');
+  data2.addColumn('number', 'Loss');
+  data3 = new google.visualization.DataTable();
+  data3.addColumn('number', 'X');
+  data3.addColumn('number', 'FPS');
+}
+
+function drawCharts() {
+  resetChartData();
+
+  chart1 = new google.visualization.LineChart(document.getElementById('scoreChart'));
+  chart1.draw(data1, chart1opt);
+  chart2 = new google.visualization.LineChart(document.getElementById('lossChart'));
+  chart2.draw(data2, chart2opt);
+  chart3 = new google.visualization.LineChart(document.getElementById('timeChart'));
+  chart3.draw(data3, chart3opt);
+}
+
+function updateGraphs() {
+  chart1.draw(data1, chart1opt);
+  chart2.draw(data2, chart2opt);
+  chart3.draw(data3, chart3opt);
+}
+
+window.onload = function() {
+	logprint(">>> Starting training");
+    initTrain();
+    logprint("init; numTensors: " + tf.memory().numTensors);
+    setTimeout(trainUpdate, 1000);
+    started = true;
+    training = true;
+}
+
+logprint("...Started");
+
+
+
+/*
+	var loop_count = 0;
+
+	function lost() {
+		alert("You lost...");
+		start();
+	}
+
+
+	function updateRacket() {
+		
+	}
+
+	var charStr;
+	document.onkeypress = function(evt) {
+		evt = evt || window.event;
+		var charCode = evt.keyCode || evt.which;
+		charStr = String.fromCharCode(charCode);
+		updateRacket();
+	};
+
+
+	function loop() {
+		refresh();
+
+		if (loop_count % 3 == 0) {
+			draw(ctx);
+		}
+		loop_count++;
+		if (loop_count<10000) {
+			setTimeout(loop, 20);
+		}
+	};
+	loop();
+*/
+
+
+</script>
+</body>
+</html>
