@@ -1,0 +1,57 @@
+<html>
+
+<head>
+	<script type="text/javascript" src="https://www.gstatic.com/charts/loader.js"></script>
+	<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@0.14.1/dist/tf.min.js"></script>
+	<!--script src="tf.min.js"></script-->
+</head>
+<body>
+	<h1 id="title">Game</h1>
+<script>
+'use strict';
+// Reinforcement Learning from https://github.com/seann999/dodge_tfjs
+
+var DEBUG=false;
+
+(async ()=>{
+
+	const model = await tf.loadModel('localstorage://my-model-2000');
+
+	//console.log(JSON.stringify(model));
+
+	var px = 0.1;
+	var vx = -0.01;
+
+	const sensors = [];
+	for (let i=0;i<10;i++) {
+		sensors.push(0); // racket position
+		sensors.push(px); // ball x coordinate
+		sensors.push(-0.4); // bale y coordinate
+		sensors.push(vx); // ball velocity x coordinate
+		sensors.push(0); // bale velocity y coordinate
+		px = px + vx;
+	}
+	console.log("sensors:",sensors);
+
+	const z = Array.prototype.concat.apply([], sensors);
+	console.log("z:",z);
+
+	const y = tf.tensor2d([z]);
+	console.log("y:",y);
+	
+	const x = tf.variable(y);
+	console.log('inputs:',x);
+
+	const predictions = model.predict(x);
+	console.log('predictions:',predictions);
+
+	const maxAct = predictions.argMax(1);
+	var act = maxAct.dataSync()[0];
+	console.log("act:", act);
+
+})()
+
+
+</script>
+</body>
+</html>

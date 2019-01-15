@@ -1,6 +1,8 @@
 <html>
 <head>
 	<script type="text/javascript" src="https://www.gstatic.com/charts/loader.js"></script>
+	<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@0.14.1/dist/tf.min.js"></script>
+	<!--script src="tf.min.js"></script-->
 </head>
 <body>
 	<h1 id="title">Game</h1>
@@ -16,11 +18,6 @@
 	<div id="scoreChart" style="height: 300px; width: 80%;"></div>
     <div id="lossChart" style="height: 300px; width: 100%;"></div>
     <div id="timeChart" style="height: 300px; width: 100%;"></div>
-
-
-<!--script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@0.14.1/dist/tf.min.js"></script-->
-<script src="tf.min.js"></script>
-<script src="reimprove.js"></script>
 
 <script>
 'use strict';
@@ -50,53 +47,8 @@ logprint("Starting...");
 // https://github.com/BeTomorrow/ReImproveJS
 
 
-/*
-function resetSignal() {
-  reset = true;
-}
-
-function toggleTrain() {
-	logprint(">> toggleTrain");
-	if (!training) {
-		logprint("starting; numTensors: " + tf.memory().numTensors);
-
-		if (!started) {
-	  		initTrain();
-	  		logprint("init; numTensors: " + tf.memory().numTensors);
-
-	  		setTimeout(trainUpdate, 0);
-
-	  		started = true;
-		}   
-
-		training = true;
-		logprint("Training: Resume");
-	} else {
-		training = false;
-		logprint("Training: Paused");
-	}
-}
-
-*/
-
-
 var speedSlider = document.getElementById('speed');
 var frameSlider = document.getElementById('frame');
-
-var test = {
-	myloop: function*() {
-		for (var i=0;i<10;i++) {
-			yield 
-				console.log(i);
-		}
-	},
-	myfunc: function() {
-		myloop.next();
-		myloop.next();
-		myloop.next();	
-	}
-};
-
 
 var train = {
 	minibatchSize: 32,
