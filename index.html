@@ -25,7 +25,7 @@
 // Reinforcement Learning from https://github.com/seann999/dodge_tfjs
 
 var DEBUG=false;
-const LOAD_VERSION=1000;
+const LOAD_VERSION=7700;
 
 function logprint(a,b,c,d) {
 	if (!DEBUG) return;
@@ -104,7 +104,7 @@ var ai_player = {
 		model.add(tf.layers.dense({
 			units: 64, // 1st Hidden Layer
 			activation: 'elu',
-			inputDim: 50 // BallX + BallY + RacketY for 10 frames
+			inputDim: 30 // BallX + BallY + RacketY for 10 frames
 		}));
 
 		model.add(tf.layers.dense({
@@ -300,7 +300,7 @@ var game = {
 	XMAX: 600,
 	YMAX: 300,
 	PAD: 50,
-	RACKET_HEIGHT: 50,
+	RACKET_HEIGHT: 40,
 	BALL_SPEED: 10,
 	BOX: null,
 	bounced_count: 0,
@@ -338,12 +338,10 @@ var game = {
 	},
 	getSensors: function() {// Return sensorial information about the game situation
 		const sensors = [];
-		//sensors.push((this.GAME.z+this.RACKET_HEIGHT/2)/this.YMAX-0.5); // racket position
-		sensors.push(this.GAME.z/this.YMAX-0.5); // racket position
-		sensors.push(this.GAME.x/this.XMAX); // ball x coordinate
-		sensors.push(this.GAME.y/this.YMAX-0.5); // bale y coordinate
-		sensors.push(this.GAME.vx/this.XMAX); // ball velocity x coordinate
-		sensors.push(this.GAME.vy/this.YMAX); // bale velocity y coordinate
+		sensors.push((this.GAME.z+this.RACKET_HEIGHT/2)/this.YMAX-0.5); // racket position
+		//sensors.push(this.GAME.z/this.YMAX-0.5); // racket position
+		sensors.push((this.GAME.x-this.BOX.x1)/(this.BOX.x2-this.BOX.x1)); // ball x coordinate
+		sensors.push((this.GAME.y-this.BOX.y1)/(this.BOX.y2-this.BOX.y1)); // bale y coordinate
 		return sensors;
 	},
 	updateBall: function() {
@@ -373,7 +371,8 @@ var game = {
 		if ((nextX<=this.BOX.x1) && (nextY>=this.GAME.z) && (nextY<=this.GAME.z+this.RACKET_HEIGHT)) {
 
 			var xr = (nextY-this.GAME.z)/this.RACKET_HEIGHT*2-1; // position on the racket from -1 to +1; 0 being the central point
-			var alpha = xr * Math.PI/4;
+			var alpha = xr * Math.PI/8;
+			alpha=0;
 			this.GAME.vy = this.GAME.vy-this.GAME.vx*Math.sin(alpha);
 			this.GAME.vx = -this.GAME.vx*Math.cos(alpha);
 
@@ -390,8 +389,8 @@ var game = {
 	},
 	updateRacket: function(act) {
 		logprint(">> updateRacket", act);
-		if (act==0) this.GAME.z = this.GAME.z - this.RACKET_HEIGHT/2; // Up key
-		if (act==2) this.GAME.z = this.GAME.z + this.RACKET_HEIGHT/2; // Down key
+		if (act==0) this.GAME.z = this.GAME.z - this.YMAX/20; // Up key
+		if (act==2) this.GAME.z = this.GAME.z + this.YMAX/20; // Down key
 		if (this.GAME.z<this.BOX.y1) {
 			this.GAME.z = this.BOX.y1;
 		}
@@ -414,11 +413,15 @@ var game = {
 		}
 		this.step_iter++;
 
+		// position where ball hit racket: 0 center, +/-1 border
+		var xracket = (this.GAME.y - (this.GAME.z + this.RACKET_HEIGHT/2))/(this.RACKET_HEIGHT/2)
+
 		var reward = 0; // nothing
 		if (status==-1) {
-			reward = -1; // Lost ball
+			// Lost ball
+			reward = -Math.abs(xracket); // Lost ball
 		} else if (status==1) {
-			reward = 1; // Rebound
+			reward = 2; // Rebound
 		} else if (act!=1) {
 			reward =  -0.1; // Moved the racket without rebound or lost ball
 		} 
@@ -526,11 +529,13 @@ function trainUpdate() {
 window.onload = function() {
 	(async ()=>{
 		ai_player.Initialize(game);
+		/*
 		const loaded_model = await tf.loadModel('localstorage://my-model-' + LOAD_VERSION);
 		for (let i = 0; i < loaded_model.weights.length; i++) {
 			ai_player.model.weights[i].val.assign(loaded_model.weights[i].val);
 		}
 		ai_player.UpdateTargetModel();
+		*/
 	    setTimeout(trainUpdate, 1000);
 	})();
 }
