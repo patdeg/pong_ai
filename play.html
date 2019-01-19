@@ -7,17 +7,333 @@
 </head>
 <body>
 	<h1 id="title">Game</h1>
+	<canvas id="myCanvas" width="600" height="300"></canvas>
+
 <script>
 'use strict';
 // Reinforcement Learning from https://github.com/seann999/dodge_tfjs
 
 var DEBUG=false;
+var LOAD_VERSION=7700;
+
+/* ---------------------------------------------- Simulate the game --- */
+var game = {
+	up: false, 
+	down: false,
+	N_ACTIONS: 3, // up, down, stay
+	frame: 0,
+	XMAX: 600,
+	YMAX: 300,
+	PAD: 50,
+	RACKET_HEIGHT: 50,
+	BALL_SPEED: 10,
+	BOX: null,
+	bounced_count: 0,
+	epoch: 0,
+	step_iter: 0,
+	GAME: null,
+	history: null,
+	canvas: null,
+	Initialize: function() {
+
+		this.canvas = document.getElementById("myCanvas");
+
+		this.resetGame();
+
+		this.model = tf.sequential();
+
+		// Input Layer: 30 (BallX + BallY + RacketY) * 10 frames
+		// Hidden Layer: 64 nodes
+		// Hidden Layer: 64 nodes
+		// Output Layer: 3 Actions (Up, Stay, Down)
+		
+		this.model.add(tf.layers.dense({
+			units: 64, // 1st Hidden Layer
+			activation: 'elu',
+			inputDim: 50 // BallX + BallY + RacketY for 10 frames
+		}));
+
+		this.model.add(tf.layers.dense({
+			units: 64, // 2nd Hidden Layer
+	  		activation: 'elu',
+	  		inputDim: 64 // 1st Hidden Layer
+		}));
+
+		this.model.add(tf.layers.dense({
+			units: 3, // Game Action: Up, Stay, Down
+			activation: 'linear',
+			inputDim: 64 // 2nd Hidden Layer
+		}));
+
+
+	},
+	resetGame: function() {
+
+		document.getElementById('title').innerHTML = 'Game ' + (this.epoch+1);
+
+		this.BOX = {
+			x1: this.PAD,
+			y1: this.PAD,
+			x2: this.XMAX-this.PAD,
+			y2: this.YMAX-this.PAD
+		};
+
+		// angle at which the ball will start moving
+		var alpha = Math.random()*2*Math.PI;
+		this.GAME = { 
+			x: this.XMAX/2, 
+			y: this.YMAX/2, 
+			vx: this.BALL_SPEED*Math.cos(alpha), 
+			vy: this.BALL_SPEED*Math.sin(alpha),
+			z: this.YMAX/2-this.RACKET_HEIGHT/2,
+			zplayer: this.YMAX/2-this.RACKET_HEIGHT/2
+		};
+
+		this.bounced_count = 0;
+		this.step_iter = 0;
+
+		this.history = [game.getSensors()];
+	},
+	getSensors: function() {// Return sensorial information about the game situation
+		const sensors = [];
+		//sensors.push((this.GAME.z+this.RACKET_HEIGHT/2)/this.YMAX-0.5); // racket position
+		sensors.push(this.GAME.z/this.YMAX-0.5); // racket position
+		sensors.push(this.GAME.x/this.XMAX); // ball x coordinate
+		sensors.push(this.GAME.y/this.YMAX-0.5); // bale y coordinate
+		sensors.push(this.GAME.vx/this.XMAX); // ball velocity x coordinate
+		sensors.push(this.GAME.vy/this.YMAX); // bale velocity y coordinate
+		return sensors;
+	},
+	stackObs: function() {
+  		const arrays = [];
+  		for (let i = 0; i < 10; i++) {
+    		arrays.push(this.history[Math.max(0, this.history.length-1-i)]);
+  		} 
+  		return Array.prototype.concat.apply([], arrays);
+	},
+	updateBall: function() {
+	
+		this.GAME.x = this.GAME.x + this.GAME.vx;
+		this.GAME.y = this.GAME.y + this.GAME.vy;
+		var nextX = this.GAME.x + this.GAME.vx;
+		var nextY = this.GAME.y + this.GAME.vy;
+
+		var gameStatus=0; // nothing special
+
+		// Upper Wall
+		if  (nextY<=this.BOX.y1)  {
+			console.log(">>> Upper wall");
+			this.GAME.vy = -this.GAME.vy
+		}
+		// Lower Wall
+		if  (nextY>=this.BOX.y2)  {
+			console.log(">>> Lower wall");
+			this.GAME.vy = -this.GAME.vy
+		}
+
+		// Racket
+		if ((nextX<=this.BOX.x1) && (nextY>=this.GAME.z) && (nextY<=this.GAME.z+this.RACKET_HEIGHT)) {
+			console.log(">>> AI Racket");
+			var xr = (nextY-this.GAME.z)/this.RACKET_HEIGHT*2-1; // position on the racket from -1 to +1; 0 being the central point
+			var alpha = xr * Math.PI/4;
+			this.GAME.vy = this.GAME.vy-this.GAME.vx*Math.sin(alpha);
+			this.GAME.vx = -this.GAME.vx*Math.cos(alpha);
+
+			gameStatus = 1; // Rebounded on ai racket
+			this.bounced_count++;
+		}
+
+		// Racket Player
+		if ((nextX>=this.BOX.x2) && (nextY>=this.GAME.zplayer) && (nextY<=this.GAME.zplayer+this.RACKET_HEIGHT)) {
+			console.log(">>> Player racket");
+
+			var xr = (nextY-this.GAME.z)/this.RACKET_HEIGHT*2-1; // position on the racket from -1 to +1; 0 being the central point
+			var alpha = xr * Math.PI/4;
+			this.GAME.vy = this.GAME.vy-this.GAME.vx*Math.sin(alpha);
+			this.GAME.vx = -this.GAME.vx*Math.cos(alpha);
+
+			gameStatus = 2; // Rebounded on player racket
+		}
+
+		// Lost
+		if (nextX<=this.PAD/2) {
+			console.log(">>> AI Lost");
+			gameStatus = -1; // Ball lost by ai
+		}		
+		// Lost player
+		if (nextX>=this.XMAX-this.PAD/2) {
+			console.log(">>> Player lost");
+			gameStatus = -2; // Ball lost by player
+		}	
+
+		return gameStatus;
+	},
+	updateRacket: function(act) {
+		if (act==0) this.GAME.z = this.GAME.z - this.RACKET_HEIGHT/2; // Up key
+		if (act==2) this.GAME.z = this.GAME.z + this.RACKET_HEIGHT/2; // Down key
+		if (this.GAME.z<this.BOX.y1) {
+			this.GAME.z = this.BOX.y1;
+		}
+		if (this.GAME.z+this.RACKET_HEIGHT>this.BOX.y2) {
+			this.GAME.z = this.BOX.y2-this.RACKET_HEIGHT;
+		}
+	},	
+	draw: function() {
+		const ctx = this.canvas.getContext("2d");
+		ctx.clearRect(0,0,this.canvas.width, this.canvas.height);
+		
+		// Draw box
+		ctx.beginPath();
+		ctx.strokeSyle='black';
+		ctx.lineWidth=5;
+		ctx.moveTo(this.BOX.x1,this.BOX.y1);
+		ctx.lineTo(this.BOX.x2,this.BOX.y1);
+		ctx.moveTo(this.BOX.x2,this.BOX.y2);
+		ctx.lineTo(this.BOX.x1,this.BOX.y2);
+		ctx.stroke();
+		
+		// Draw racket AI
+		ctx.beginPath();
+		ctx.strokeSyle='green';
+		ctx.lineWidth=5;
+		ctx.moveTo(this.BOX.x1,this.GAME.z);
+		ctx.lineTo(this.BOX.x1,this.GAME.z+this.RACKET_HEIGHT);
+		ctx.stroke();		
+
+		// Draw racket Player
+		ctx.beginPath();
+		ctx.strokeSyle='blue';
+		ctx.lineWidth=5;
+		ctx.moveTo(this.BOX.x2,this.GAME.zplayer);
+		ctx.lineTo(this.BOX.x2,this.GAME.zplayer+this.RACKET_HEIGHT);
+		ctx.stroke();
+
+		// Draw ball
+		ctx.beginPath();
+		ctx.fillStyle='red';
+	  	ctx.strokeSyle='red';
+		ctx.lineWidth=1;
+		ctx.arc(this.GAME.x, this.GAME.y, 5, 0, 2*Math.PI);
+		ctx.fill();
+	}
+};
+
+window.addEventListener('keydown', (e) => {
+	var code = e.keyCode;
+	if (code == 87) { // W
+		console.log("Player press W");
+		game.up = true;
+		game.down = false;
+	}
+	if (code == 83) { // S
+		console.log("Player press S");
+		game.down = true; 
+		game.up = false; 		
+	}
+}, false);
+
+window.addEventListener('keyup', (e) => {
+	var code = e.keyCode;
+	game.up = false; // W
+	game.down = false; // S
+}, false);
+
+
+function PlayOneFrame() {
+
+	if (game.up) game.GAME.zplayer = game.GAME.zplayer - game.RACKET_HEIGHT/2; // Up key
+	if (game.down) game.GAME.zplayer = game.GAME.zplayer + game.RACKET_HEIGHT/2; // Down key
+	if (game.GAME.zplayer<game.BOX.y1) {
+		game.GAME.zplayer = game.BOX.y1;
+	}
+	if (game.GAME.zplayer+game.RACKET_HEIGHT>game.BOX.y2) {
+		game.GAME.zplayer = game.BOX.y2-game.RACKET_HEIGHT;
+	}
+	
+	const x = tf.variable(tf.tensor2d([Array.prototype.concat.apply([], game.stackObs())]));
+	var act = game.model.predict(x).argMax(1).dataSync()[0];
+	console.log("AI said:",act);
+	game.updateRacket(act);
+
+	status = game.updateBall();
+
+	var status = game.updateBall();
+	game.updateRacket(act);
+	game.draw();
+
+	console.log("Game:",game.GAME);
+
+	if (status==-2) {
+		alert("Player lost");
+		return;
+	} if (status==-1) {
+		alert("AI lost");
+		return;
+	}
+
+	game.history.push(game.getSensors());
+
+	setTimeout(PlayOneFrame, 500);
+};
+
+window.onload = function() {
+	(async ()=>{
+		game.Initialize();
+		const loaded_model = await tf.loadModel('localstorage://my-model-' + LOAD_VERSION);
+		for (let i = 0; i < loaded_model.weights.length; i++) {
+			game.model.weights[i].val.assign(loaded_model.weights[i].val);
+		}
+		setTimeout(PlayOneFrame, 1000);
+	})();
+}
+
+
+/*
 
 (async ()=>{
 
-	const model = await tf.loadModel('localstorage://my-model-2000');
+	const modelLoad = await tf.loadModel('localstorage://my-model-' + VERSION);
 
-	//console.log(JSON.stringify(model));
+	await modelLoad.save('downloads://pong-ai-' + VERSION);
+
+	//const model = await tf.loadModel(tf.io.browserFiles(['/home/pdeglon/work/pong_ai/pong-ai-2000.json', '/home/pdeglon/work/pong_ai/pong-ai-2000.weights.bin']));
+
+	console.log("length", localStorage.length);
+	for (let i=0;i<1000;i++) {
+		console.log("key ", i,  localStorage.key(i));		
+	}
+	
+	/*
+	console.log(localStorage['tensorflowjs_models/my-model-' + VERSION + '/weight_data'])
+	console.log(JSON.stringify(modelLoad));
+
+	const model = tf.sequential();
+
+	model.add(tf.layers.dense({
+		units: 64, // 1st hidden layer
+		activation: 'elu',
+		inputDim: 50 // 5 inputs * 10 stack frames
+	}));
+
+	model.add(tf.layers.dense({
+		units: 64, // 2nd hidden layer
+  		activation: 'elu',
+  		inputDim: 64 // size of 1st hidden layer
+	}));
+
+	model.add(tf.layers.dense({
+		units: 3, // 3 actions
+		activation: 'linear',
+		inputDim: 64 // size of 2nd hidden layer
+	}));
+
+	
+
+	for (let i = 0; i < model.weights.length; i++) {
+		model.weights[i].val.assign(model_weight[i]);
+		//model.weights[i].val.assign(modelLoad.weights[i].val);
+	}
+
 
 	var px = 0.1;
 	var vx = -0.01;
@@ -50,7 +366,7 @@ var DEBUG=false;
 	console.log("act:", act);
 
 })()
-
+*/
 
 </script>
 </body>

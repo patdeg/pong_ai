@@ -1,9 +1,8 @@
 <html>
 <head>
-	<!--script type="text/javascript" src="https://www.gstatic.com/charts/loader.js"></script>
-	<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@0.14.1/dist/tf.min.js"></script-->
-	<script src="tf.min.js"></script>
-	<script src="loader.js"></script>
+	<script type="text/javascript" src="https://www.gstatic.com/charts/loader.js"></script>
+	<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@0.14.1/dist/tf.min.js"></script>
+	<!--script src="tf.min.js"></script-->
 </head>
 <body>
 	<h1 id="title">Game</h1>
@@ -25,7 +24,8 @@
 // Reinforcement Learning from https://github.com/seann999/dodge_tfjs
 
 var DEBUG=false;
-const LOAD_VERSION=1000;
+
+const loaded_model = tf.loadModel('localstorage://my-model-1');
 
 function logprint(a,b,c,d) {
 	if (!DEBUG) return;
@@ -47,86 +47,135 @@ logprint("Starting...");
 // https://github.com/BeTomorrow/ReImproveJS
 
 
-
 var speedSlider = document.getElementById('speed');
 var frameSlider = document.getElementById('frame');
 
-var ai_player = {
-
-	stackFrames: 10,
+var train = {
 	minibatchSize: 32,
 	replayMemorySize: 10000,
+	stackFrames: 10,
 	targetUpdateFreq: 100,
+	discount: 0.99,
+	actionRepeat: 1,
+	learningRate: 0.001,
 	initExp: 1.0,
 	finExp: 0.1,
 	finExpFrame: 10000,
 	replayStartSize: 100,
-	
+	numSensors: 4,
+	//hiddenLayers: [64, 64],
+	hiddenLayers: [64, 64],
+	activation: 'elu',
+	maxEpisodeFrames: 10000,
+	info: null,
+	reset: false,
 	model: null,
 	targetModel: null,
 	modelVars: null,
 	replay: null,
 	optimizer: null,
 	trainer: null,
-	Initialize: function(game) {
+	resetTrain: function() {
+		logprint(">> resetTrain");
+
+		this.reset = false;
+		this.info = null;
 
 		game.resetGame();
 
+		logprint("resetting; numTensors: " + tf.memory().numTensors);
+
+		for (let i = 0; i < this.model.weights.length; i++) {
+			this.model.weights[i].val.dispose();
+		}
+
+		for (let i = 0; i < this.targetModel.weights.length; i++) {
+			this.targetModel.weights[i].val.dispose();
+		}
+
+		//for(var key in optimizer) {
+			//if (optimizer[key]['isDisposed'] !== undefined) {
+			//	optimizer[key].dispose();
+			//}
+		//}
+
+		logprint('model:',this.model);
+		logprint('targerModel:',this.targetModel);
+		logprint("reset; numTensors: " + tf.memory().numTensors);
+
+		logprint('>>> Training Mode: Start');
+
+	},
+	initTrain: function() {
+		logprint(">> initTrain");
+
 		this.modelVars = [];
 		this.replay = [];
-		this.optimizer = tf.train.adam(0.001); // Learning Rate = 0.001
+		this.optimizer = tf.train.adam(this.learningRate);
 
-		this.trainer = Trainer();
+		this.trainer = trainGen();
 
-		this.targetModel =  this.CreateModel();
-		this.model = this.CreateModel();
-		this.UpdateTargetModel();
+		logprint("building model...");
+		this.targetModel =  this.createModel();
+		this.model = this.createModel();
+		this.targetUpdate();
 
 		for (let i = 0; i < this.model.weights.length; i++) {
 			this.modelVars.push(this.model.weights[i].val);
 		}
 
-		/*
 		for (let i = 0; i < this.model.weights.length; i++) {
 			logprint('dataSync',i,this.model.weights[i].val.dataSync());
 		}
-		*/
-
 	},
-	CreateModel: function() {
+	createModel: function(stack) {
+		logprint(">> createModel");
+
 		const model = tf.sequential();
 
-		// Input Layer: 30 (BallX + BallY + RacketY) * 10 frames
-		// Hidden Layer: 64 nodes
-		// Hidden Layer: 64 nodes
-		// Output Layer: 3 Actions (Up, Stay, Down)
-		
 		model.add(tf.layers.dense({
-			units: 64, // 1st Hidden Layer
-			activation: 'elu',
-			inputDim: 50 // BallX + BallY + RacketY for 10 frames
+			units: this.hiddenLayers[0],
+			activation: this.activation,
+			inputDim: (this.numSensors+1)*this.stackFrames
 		}));
 
-		model.add(tf.layers.dense({
-			units: 64, // 2nd Hidden Layer
-	  		activation: 'elu',
-	  		inputDim: 64 // 1st Hidden Layer
-		}));
+		for (let i = 0; i < this.hiddenLayers.length-1; i++) {
+			model.add(tf.layers.dense({
+				units: this.hiddenLayers[i+1],
+		  		activation: this.activation,
+		  		inputDim: this.hiddenLayers[i]
+			}));
+		}
 
 		model.add(tf.layers.dense({
-			units: 3, // Game Action: Up, Stay, Down
+			units: game.N_ACTIONS,
 			activation: 'linear',
-			inputDim: 64 // 2nd Hidden Layer
+			inputDim: this.hiddenLayers[this.hiddenLayers.length-1]
 		}));
 
 		return model;
 	},
-	UpdateTargetModel: function() {
+	targetUpdate: function() {
+		logprint(">> targetUpdate");
+
 		for (let i = 0; i < this.model.weights.length; i++) {
 			this.targetModel.weights[i].val.assign(this.model.weights[i].val);
 		}
 	},
-	Learn: function() {
+	mse: function(predictions, targets, mask) {
+		logprint(">> mse");
+		const e = tf.mul(predictions.sub(targets.expandDims(1)).square(), mask.asType('float32')).mean();
+		return e;
+	},
+	calcTarget: function(batchR, batchNextS, batchDone) {
+		logprint(">> calcTarget");
+		return tf.tidy(() => {
+			const maxQ = this.targetModel.predict(batchNextS).max(1);
+			const targets = batchR.add(maxQ.mul(tf.scalar(this.discount)).mul(batchDone));
+			return targets;
+		});
+	},
+	learn: function() {
 		const arrayPrevS = [];
 		const arrayA = [];
 		const arrayR = [];
@@ -135,12 +184,13 @@ var ai_player = {
 
 		for (let i = 0; i < this.minibatchSize; i++) {
 			const exp = this.replay[Math.floor(Math.random() * this.replay.length)];
-			arrayPrevS.push(exp.prevS);			// Last 10 Obeservation excluding current (10* BallX, BallY, RacketY)
-			arrayA.push(exp.action);			// Last 10 Actions (0=Up, 1=Stay, 2=Down)
-			arrayNextS.push(exp.nextS);			// Last 10 Observations including current (10* BallX, BallY, RacketY)
-			arrayR.push(exp.reward); 			// Last 10 Reward
-			arrayDone.push(exp.done ? 0 : 1);	// Last 10 Boolean True=Lost Game
+			arrayPrevS.push(exp.prevS);
+			arrayA.push(exp.action);
+			arrayNextS.push(exp.nextS);
+			arrayR.push(exp.reward);
+			arrayDone.push(exp.done ? 0 : 1);
 		}
+
 		
 		const batchPrevS = tf.tensor2d(arrayPrevS);
 		const batchA = tf.tensor1d(arrayA, 'int32');
@@ -148,21 +198,20 @@ var ai_player = {
 		const batchNextS = tf.tensor2d(arrayNextS);
 		const batchDone = tf.tensor1d(arrayDone);
 	  
-		const predMask = tf.oneHot(batchA, 3); // 3 Actions (Up, Stay, Down)
+		const predMask = tf.oneHot(batchA, game.N_ACTIONS);
 
-		const targets = tf.tidy(() => {
-			const maxQ = this.targetModel.predict(batchNextS).max(1);
-			const targets = batchR.add(maxQ.mul(tf.scalar(0.99)).mul(batchDone)); // Discount = 0.99
-			return targets;
-		});
+		const targets = this.calcTarget(batchR, batchNextS, batchDone);
 
 	  	const loss = this.optimizer.minimize(() => {
-	    	const predictions = this.model.predict(tf.variable(batchPrevS));
-	    	const re = tf.mul(predictions.sub(targets.expandDims(1)).square(), predMask.asType('float32')).mean();
+	    	const x = tf.variable(batchPrevS);
+	    	const predictions = this.model.predict(x);
+	    	const re = this.mse(predictions, targets, predMask);
+	    	x.dispose();
 	    	return re;
 	  	}, true, this.modelVars);
 
 		targets.dispose();
+
 		batchPrevS.dispose();
 		batchA.dispose();
 		batchR.dispose();
@@ -173,122 +222,7 @@ var ai_player = {
 
 	 	return loss;
 	}
-}
 
-
-function* Trainer (episodes = 10000000) {
-	logprint(">> trainGen");
-	var totalFrames = 0;
-
- 	for (let ep = 0; ep < episodes; ep++) {
- 		logprint(">> Episode:",ep);
- 		
-	    var history = [game.resetGame()];
-	    var epDone = false;
-	    var epFrames = 0;
-	    const startTime = new Date().getTime();
-
-    	function stackObs() {
-    		logprint(">> stackObs");
-      		const arrays = [];
-
-      		for (let i = 0; i < ai_player.stackFrames; i++) {
-        		arrays.push(history[Math.max(0, history.length-1-i)]);
-      		}
-      		return Array.prototype.concat.apply([], arrays);
-    	}
-
-    	while (!epDone) {
-    		logprint("loop:",epDone);
-
-      		var act = Math.floor(Math.random()*game.N_ACTIONS);
-      		const observation = stackObs();
-
-      		const obsTensor = tf.tensor2d([observation]);
-      		const vals = ai_player.model.predict(obsTensor);
-      		obsTensor.dispose();
-
-      		const a = Math.min(1, totalFrames/ai_player.finExpFrame);
-
-	        if (ai_player.replay.length >= ai_player.replayStartSize && Math.random() > a*ai_player.finExp+(1-a)*ai_player.initExp) {
-	        	const maxAct = vals.argMax(1);
-				act = maxAct.dataSync()[0];
-				maxAct.dispose();
-	        }
-
-	        // Play one frame
-	      	var result = game.step(act);
-	        
-	      	const normVals = tf.softmax(vals);
-
-	      	history.push(result.sensors);
-	      	const nextS = stackObs();
-
-			yield {
-				frame: totalFrames,
-				episode: ep,
-				score: epFrames,
-				observation: nextS,
-				reward: result.reward,
-				values: vals.dataSync(),
-				normValues: normVals.dataSync(),
-				action: act
-			};
-
-			vals.dispose();
-			normVals.dispose();
-
-			epDone = result.gameOver || ai_player.reset;
-
-			ai_player.replay.push({
-				prevS: observation, 
-				action: act, 
-				reward: result.reward, 
-				nextS: nextS, 
-				done: epDone
-			});
-
-			if (ai_player.replay.length > ai_player.replayMemorySize) {
-				ai_player.replay = ai_player.replay.slice(ai_player.replay.length - ai_player.replayMemorySize);
-			}
-
-	      	if (ai_player.replay.length >= ai_player.replayStartSize) {
-	        	const loss = ai_player.Learn();
-
-	        	if (result.gameOver) {
-	          		const lossc = loss.dataSync()[0];
-	          		console.log("Loss:",lossc);
-	          		console.log("Bounced:",game.bounced_count);
-	          		graph.data2.addRows([[ep, lossc]]);
-
-	          		if (((game.epoch<100) && (game.epoch % 10 == 0)) ||  (game.epoch % 100 == 0)) {
-						console.log("Saving model...");
-						const status = ai_player.model.save('localstorage://my-model-' + game.epoch);
-						console.log("Status:",status);
-					}
-	        	}
-	        	loss.dispose();
-	     	}
-
-	      	epFrames++;
-	      	totalFrames++;
-
-	      	if (totalFrames % ai_player.targetUpdateFreq === 0) {
-	        	ai_player.UpdateTargetModel();
-				logprint("frame: " + totalFrames);
-				logprint("replay buffer: " + ai_player.replay.length);
-				logprint("numTensors: " + tf.memory().numTensors);
-			}
-	    }
-
-	    const fps = game.step_iter/((new Date().getTime() - startTime)/1000);
-	    console.log("ep " + ep + ": survived " + epFrames + "; frames/second: " + fps);
-
-	    graph.data1.addRows([[ep, game.bounced_count]]);
-	    graph.data3.addRows([[ep, fps]]);
-	    graph.updateGraphs();
-	    game.epoch++;
-	}
 }
 
 /* ---------------------------------------------- Simulate the game --- */
@@ -332,13 +266,12 @@ var game = {
 
 		this.bounced_count = 0;
 		this.step_iter = 0;
-
+		
 		// return initial observation
 		return this.getSensors();
 	},
 	getSensors: function() {// Return sensorial information about the game situation
 		const sensors = [];
-		//sensors.push((this.GAME.z+this.RACKET_HEIGHT/2)/this.YMAX-0.5); // racket position
 		sensors.push(this.GAME.z/this.YMAX-0.5); // racket position
 		sensors.push(this.GAME.x/this.XMAX); // ball x coordinate
 		sensors.push(this.GAME.y/this.YMAX-0.5); // bale y coordinate
@@ -371,12 +304,7 @@ var game = {
 
 		// Racket
 		if ((nextX<=this.BOX.x1) && (nextY>=this.GAME.z) && (nextY<=this.GAME.z+this.RACKET_HEIGHT)) {
-
-			var xr = (nextY-this.GAME.z)/this.RACKET_HEIGHT*2-1; // position on the racket from -1 to +1; 0 being the central point
-			var alpha = xr * Math.PI/4;
-			this.GAME.vy = this.GAME.vy-this.GAME.vx*Math.sin(alpha);
-			this.GAME.vx = -this.GAME.vx*Math.cos(alpha);
-
+			this.GAME.vx = -this.GAME.vx
 			gameStatus = 1; // Rebounded on racket
 			this.bounced_count++;
 		}
@@ -422,6 +350,8 @@ var game = {
 		} else if (act!=1) {
 			reward =  -0.1; // Moved the racket without rebound or lost ball
 		} 
+
+
 		return {sensors: sensors, reward: reward, gameOver: status==-1};
 
 	},
@@ -508,31 +438,150 @@ window.addEventListener('keydown', (e) => {
 	//if (code == 27) game.resetGame(); // esc
 
 	if (code == 83) { // S
-		console.log("Saving model...", ai_player.model);
-		const status = ai_player.model.save('localstorage://my-model-1');
+		console.log("Saving model...", train.model);
+		const status = train.model.save('localstorage://my-model-1');
 		console.log("Status:",status);
 	}
 }, false);
 
+function* trainGen (episodes = 10000000) {
+	logprint(">> trainGen");
+	var totalFrames = 0;
+
+ 	for (let ep = 0; ep < episodes; ep++) {
+ 		logprint(">> Episode:",ep);
+ 		
+	    var history = [game.resetGame()];
+	    var epDone = false;
+	    var epFrames = 0;
+	    const startTime = new Date().getTime();
+
+    	function stackObs() {
+    		logprint(">> stackObs");
+      		const arrays = [];
+
+      		for (let i = 0; i < train.stackFrames; i++) {
+        		arrays.push(history[Math.max(0, history.length-1-i)]);
+      		}
+
+      		return Array.prototype.concat.apply([], arrays);
+    	}
+
+    	while (!epDone) {
+    		logprint("loop:",epDone);
+
+      		var act = Math.floor(Math.random()*game.N_ACTIONS);
+      		const observation = stackObs();
+      		const obsTensor = tf.tensor2d([observation]);
+      		const vals = train.model.predict(obsTensor);
+      		obsTensor.dispose();
+
+      		const a = Math.min(1, totalFrames/train.finExpFrame);
+
+	        if (train.replay.length >= train.replayStartSize && Math.random() > a*train.finExp+(1-a)*train.initExp) {
+	        	const maxAct = vals.argMax(1);
+				act = maxAct.dataSync()[0];
+				maxAct.dispose();
+	        }
+
+	      	var result = null;
+	      	logprint("Looping on action");
+	      	for (let t = 0; t < train.actionRepeat; t++) {
+	        	result = game.step(act);
+	        	logprint("step loop:",t,result);
+	      	}
+
+	      	const normVals = tf.softmax(vals);
+
+	      	history.push(result.sensors);
+	      	const nextS = stackObs();
+
+			yield {
+				frame: totalFrames,
+				episode: ep,
+				score: epFrames,
+				observation: nextS,
+				reward: result.reward,
+				values: vals.dataSync(),
+				normValues: normVals.dataSync(),
+				action: act
+			};
+
+			vals.dispose();
+			normVals.dispose();
+
+			epDone = result.gameOver || epFrames > train.maxEpisodeFrames || train.reset;
+
+			train.replay.push({
+				prevS: observation, 
+				action: act, 
+				reward: result.reward, 
+				nextS: nextS, 
+				done: epDone
+			});
+
+			if (train.replay.length > train.replayMemorySize) {
+				train.replay = train.replay.slice(train.replay.length - train.replayMemorySize);
+			}
+
+	      	if (train.replay.length >= train.replayStartSize) {
+	        	const loss = train.learn();
+
+	        	if (result.gameOver) {
+	          		const lossc = loss.dataSync()[0];
+	          		console.log("Loss:",lossc);
+	          		console.log("Bounced:",game.bounced_count);
+	          		graph.data2.addRows([[ep, lossc]]);
+
+	          		if (((game.epoch<100) && (game.epoch % 10 == 1)) ||  (game.epoch % 100 == 0)) {
+						console.log("Saving model...");
+						const status = train.model.save('localstorage://my-model-' + game.epoch);
+						console.log("Status:",status);
+					}
+	        	}
+	        	loss.dispose();
+	     	}
+
+	      	epFrames++;
+	      	totalFrames++;
+
+	      	if (totalFrames % train.targetUpdateFreq === 0) {
+	        	train.targetUpdate();
+				logprint("frame: " + totalFrames);
+				logprint("replay buffer: " + train.replay.length);
+				logprint("numTensors: " + tf.memory().numTensors);
+			}
+	    }
+
+	    const fps = game.step_iter/((new Date().getTime() - startTime)/1000);
+	    console.log("ep " + ep + ": survived " + epFrames + "; frames/second: " + fps);
+
+	    graph.data1.addRows([[ep, game.bounced_count]]);
+	    graph.data3.addRows([[ep, fps]]);
+	    graph.updateGraphs();
+	    game.epoch++;
+	}
+}
 
 
 function trainUpdate() {
-	for (let i = 0; i < Math.max(1, speedSlider.value); i++) {
-		ai_player.info = ai_player.trainer.next().value;
+	logprint(">> trainUpdate");
+	if (train.reset) {
+		logprint("reseting...");
+		train.resetTrain();
+	} else {
+		for (let i = 0; i < Math.max(1, speedSlider.value); i++) {
+			train.info = train.trainer.next().value;
+		}
+		setTimeout(trainUpdate, Math.max(0, -speedSlider.value));
 	}
-	setTimeout(trainUpdate, Math.max(0, -speedSlider.value));
 }
 
 window.onload = function() {
-	(async ()=>{
-		ai_player.Initialize(game);
-		const loaded_model = await tf.loadModel('localstorage://my-model-' + LOAD_VERSION);
-		for (let i = 0; i < loaded_model.weights.length; i++) {
-			ai_player.model.weights[i].val.assign(loaded_model.weights[i].val);
-		}
-		ai_player.UpdateTargetModel();
-	    setTimeout(trainUpdate, 1000);
-	})();
+	logprint(">>> Starting training");
+    train.initTrain();
+    logprint("init; numTensors: " + tf.memory().numTensors);
+    setTimeout(trainUpdate, 1000);
 }
 
 google.charts.load('current', {packages: ['corechart', 'line']});
@@ -559,3 +608,4 @@ logprint("...Started");
 </script>
 </body>
 </html>
+
